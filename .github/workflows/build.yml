@@ -1,0 +1,29 @@
+name: Build vt-smoke-test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for iphoneos arm64
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK=$SDK"
+          xcrun --sdk iphoneos clang -arch arm64 -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 \
+            -framework Foundation -framework VideoToolbox \
+            -framework CoreMedia -framework CoreVideo \
+            -O2 -o vt-smoke-test vt-smoke-test.m
+          file vt-smoke-test
+          codesign -f -s - vt-smoke-test || echo "ad-hoc codesign failed (non-fatal)"
+          codesign -dv vt-smoke-test 2>&1 || true
+          ls -la vt-smoke-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vt-smoke-test
+          path: vt-smoke-test
