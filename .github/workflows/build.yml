@@ -10,12 +10,65 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Verify every API symbol against the SDK headers
+        # Groundwork gate (Garrett: pass the first time). Every symbol the
+        # source uses must exist in the actual iOS SDK headers. A wrong or
+        # made-up symbol fails here with a clear list, never as a surprise
+        # clang error later.
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK=$SDK"
+          VT="$SDK/System/Library/Frameworks/VideoToolbox.framework/Headers"
+          CM="$SDK/System/Library/Frameworks/CoreMedia.framework/Headers"
+          CV="$SDK/System/Library/Frameworks/CoreVideo.framework/Headers"
+          FAIL=0
+          check() { # $1 = header file, $2 = symbol
+            if grep -q "$2" "$1"; then
+              echo "OK   $2"
+            else
+              echo "MISSING $2 (in $1)"
+              FAIL=1
+            fi
+          }
+          check "$VT/VTCompressionProperties.h" kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder
+          check "$VT/VTCompressionProperties.h" kVTVideoEncoderSpecification_EnableLowLatencyRateControl
+          check "$VT/VTCompressionProperties.h" kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder
+          check "$VT/VTCompressionProperties.h" kVTCompressionPropertyKey_RealTime
+          check "$VT/VTCompressionProperties.h" kVTCompressionPropertyKey_AllowFrameReordering
+          check "$VT/VTCompressionProperties.h" kVTCompressionPropertyKey_ProfileLevel
+          check "$VT/VTCompressionProperties.h" kVTCompressionPropertyKey_AverageBitRate
+          check "$VT/VTCompressionProperties.h" kVTCompressionPropertyKey_ExpectedFrameRate
+          check "$VT/VTCompressionProperties.h" kVTCompressionPropertyKey_MaxKeyFrameInterval
+          check "$VT/VTCompressionProperties.h" kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
+          check "$VT/VTCompressionSession.h" VTCompressionSessionCreate
+          check "$VT/VTCompressionSession.h" VTCompressionSessionPrepareToEncodeFrames
+          check "$VT/VTCompressionSession.h" VTCompressionSessionEncodeFrame
+          check "$VT/VTCompressionSession.h" VTCompressionSessionCompleteFrames
+          check "$VT/VTCompressionSession.h" VTCompressionSessionInvalidate
+          check "$VT/VTSession.h" VTSessionSetProperty
+          check "$VT/VTSession.h" VTSessionCopyProperty
+          check "$CM/CMFormatDescription.h" kCMVideoCodecType_H264
+          check "$CM/CMFormatDescription.h" CMVideoFormatDescriptionGetH264ParameterSetAtIndex
+          check "$CV/CVPixelBuffer.h" kCVPixelFormatType_32BGRA
+          check "$CM/CMSampleBuffer.h" kCMSampleAttachmentKey_NotSync
+          check "$CM/CMSampleBuffer.h" CMSampleBufferGetSampleAttachmentsArray
+          check "$CM/CMSampleBuffer.h" CMSampleBufferGetDataBuffer
+          check "$CM/CMSampleBuffer.h" CMSampleBufferDataIsReady
+          check "$CM/CMSampleBuffer.h" CMSampleBufferGetFormatDescription
+          check "$CM/CMBlockBuffer.h" CMBlockBufferGetDataPointer
+          echo "--- LowLatency lines in VTCompressionProperties.h (for the record) ---"
+          grep -n "LowLatency" "$VT/VTCompressionProperties.h" || echo "(none)"
+          if [ "$FAIL" -ne 0 ]; then
+            echo "SYMBOL GATE FAILED: one or more symbols are missing from the SDK headers"
+            exit 1
+          fi
+          echo "SYMBOL GATE PASSED: all symbols present in SDK headers"
       - name: Build for iphoneos arm64
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "SDK=$SDK"
           xcrun --sdk iphoneos clang -arch arm64 -isysroot "$SDK" \
-            -miphoneos-version-min=14.0 \
+            -miphoneos-version-min=17.4 \
             -framework Foundation -framework VideoToolbox \
             -framework CoreMedia -framework CoreVideo \
             -O2 -o vt-smoke-test vt-smoke-test.m

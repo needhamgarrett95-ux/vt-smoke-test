@@ -14,6 +14,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <time.h>
 
 static const int kWidth  = 540;
 static const int kHeight = 405;
@@ -129,26 +130,57 @@ int main(int argc, char **argv) {
                 mode, requireHW, kWidth, kHeight, kFrames, kFps);
 
         // --- 1. Create the session -------------------------------------
+        // Encoder-spec keys (set at creation, NOT session properties):
+        //   RequireHardwareAcceleratedVideoEncoder — creation FAILS if no
+        //   hardware encoder is available. That failure IS the Phase-2
+        //   gate signal.
+        //   EnableLowLatencyRateControl — low-latency mode lives here, in
+        //   the spec dict (WWDC 2021 Session 10158). It is NOT a session
+        //   property; setting it via VTSessionSetProperty was the bug that
+        //   failed the first build (symbol does not exist).
         CFMutableDictionaryRef spec = CFDictionaryCreateMutable(
             NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(spec,
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
             requireHW ? kCFBooleanTrue : kCFBooleanFalse);
+        CFDictionarySetValue(spec,
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
+            kCFBooleanTrue);
 
         VTCompressionSessionRef session = NULL;
         double t0 = now_s();
         OSStatus st = VTCompressionSessionCreate(
             NULL, kWidth, kHeight, kCMVideoCodecType_H264,
             spec, NULL, NULL, encodeCallback, NULL, &session);
-        CFRelease(spec);
-        fprintf(stderr, "[vt-smoke] VTCompressionSessionCreate -> %d (%.3fs)\n",
+        fprintf(stderr, "[vt-smoke] VTCompressionSessionCreate (with low-latency spec) -> %d (%.3fs)\n",
                 (int)st, now_s() - t0);
+        if ((st != noErr || !session) && requireHW) {
+            // Diagnostic retry: isolate whether the failure is "no hardware
+            // encoder" or "low-latency spec key rejected". Retry with the
+            // low-latency key removed; log the outcome either way.
+            CFDictionaryRemoveValue(spec,
+                kVTVideoEncoderSpecification_EnableLowLatencyRateControl);
+            t0 = now_s();
+            st = VTCompressionSessionCreate(
+                NULL, kWidth, kHeight, kCMVideoCodecType_H264,
+                spec, NULL, NULL, encodeCallback, NULL, &session);
+            fprintf(stderr, "[vt-smoke] VTCompressionSessionCreate (WITHOUT low-latency spec) -> %d (%.3fs)\n",
+                    (int)st, now_s() - t0);
+            if (st == noErr && session)
+                fprintf(stderr, "[vt-smoke] NOTE: low-latency spec key was the problem, not the hardware encoder\n");
+        }
+        CFRelease(spec);
         if (st != noErr || !session) {
             fprintf(stderr, "[vt-smoke] RESULT: ENCODER_CREATE_FAILED status=%d\n", (int)st);
             fclose(g_out); return 1;
         }
 
         // --- 2. Hardware or software? (documented read-only property) --
+        // LOG ONLY, never a gate: Chromium notes this flag is NOT set for
+        // low-latency encoders, so NO here does NOT prove software encode.
+        // The real hardware gate is step 1: creation with
+        // RequireHardwareAcceleratedVideoEncoder fails outright if no
+        // hardware encoder is available.
         CFBooleanRef usingHW = NULL;
         st = VTSessionCopyProperty(session,
             kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
@@ -165,7 +197,7 @@ int main(int argc, char **argv) {
         struct { CFStringRef key; const void *val; const char *name; } props[] = {
             { kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, "RealTime" },
             { kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering" },
-            { kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel, "ProfileLevel=Baseline" },
+            { kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel, "ProfileLevel=ConstrainedBaseline" },
         };
         for (size_t i = 0; i < sizeof(props)/sizeof(props[0]); i++) {
             st = VTSessionSetProperty(session, props[i].key, props[i].val);
@@ -186,10 +218,8 @@ int main(int argc, char **argv) {
         st = VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, kfiNum);
         fprintf(stderr, "[vt-smoke] set MaxKeyFrameInterval=60 -> %d\n", (int)st);
         CFRelease(kfiNum);
-        // Low-latency rate control (iOS 15+ property; non-fatal if rejected).
-        st = VTSessionSetProperty(session,
-            kVTCompressionPropertyKey_EnableLowLatencyRateControl, kCFBooleanTrue);
-        fprintf(stderr, "[vt-smoke] set EnableLowLatencyRateControl -> %d (non-fatal)\n", (int)st);
+        // (No low-latency property set here: low-latency is an encoder-spec
+        // key, set at creation above. See step 1 comment.)
 
         st = VTCompressionSessionPrepareToEncodeFrames(session);
         fprintf(stderr, "[vt-smoke] PrepareToEncodeFrames -> %d\n", (int)st);
